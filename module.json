@@ -5,7 +5,7 @@
     "en": "Game Buddy",
     "zh-CN": "游戏助手"
   },
-  "version": "0.3.0",
+  "version": "0.4.0",
   "kind": "exe",
   "entry": "game-buddy.exe",
   "description": "悬浮于游戏窗口的在线 RAG 游戏助手：即时提问，由在线知识库回答攻略与操作问题",

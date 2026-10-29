@@ -1,6 +1,6 @@
 [package]
 name = "game-buddy"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 description = "SideDesk 悬浮式在线 RAG 游戏助手（sidecar 模块）"
 license = "MIT"
@@ -10,6 +10,7 @@ name = "game-buddy"
 path = "src/main.rs"
 
 [dependencies]
+base64 = "0.22"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 

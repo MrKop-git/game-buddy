@@ -11,9 +11,15 @@ const KEY_MODEL: &str = "model";
 const KEY_SYSTEM: &str = "system";
 const KEY_LANG: &str = "lang";
 const KEY_PRESETS: &str = "presets";
+const KEY_RAG_URL: &str = "ragUrl";
+const KEY_RAG_USER: &str = "ragUser";
+const KEY_RAG_PASS: &str = "ragPass";
+const KEY_RAG_TOP_K: &str = "ragTopK";
 
 /// 快捷提问槽位数量（界面是静态声明，槽位固定，每个槽一个动作名）。
 pub const PRESET_SLOTS: usize = 3;
+/// 知识库检索默认取几条片段。
+pub const DEFAULT_RAG_TOP_K: usize = 5;
 
 /// 模块配置。空 `base_url` / `api_key` / `model` 视为未配置。
 #[derive(Debug, Clone, Default)]
@@ -26,6 +32,13 @@ pub struct Config {
     pub lang: String,
     /// 快捷提问文案，长度恒为 [`PRESET_SLOTS`]（空串 = 该槽不显示按钮）。
     pub presets: Vec<String>,
+    /// 知识库检索端点（如 `https://gw.mrkop.com/wow-rag/v1/retrieve`，留空则不检索）。
+    pub rag_url: String,
+    /// 检索端点的 Basic Auth 用户名 / 口令（留空则不带凭据）。
+    pub rag_user: String,
+    pub rag_pass: String,
+    /// 每次检索取几条。
+    pub rag_top_k: usize,
 }
 
 /// 加载结果：配置本体 + 是否因为**缺少能力授权**而读不到。
@@ -39,6 +52,11 @@ pub struct LoadOutcome {
 }
 
 impl Config {
+    /// 是否启用了知识库检索。
+    pub fn is_rag_enabled(&self) -> bool {
+        !self.rag_url.trim().is_empty()
+    }
+
     /// 是否具备发起请求的最低条件。
     pub fn is_ready(&self) -> bool {
         !self.base_url.trim().is_empty() && !self.api_key.trim().is_empty() && !self.model.trim().is_empty()
@@ -61,6 +79,12 @@ impl Config {
             system: get(conn, KEY_SYSTEM, &mut denied),
             lang,
             presets: Vec::new(),
+            rag_url: get(conn, KEY_RAG_URL, &mut denied),
+            rag_user: get(conn, KEY_RAG_USER, &mut denied),
+            rag_pass: get(conn, KEY_RAG_PASS, &mut denied),
+            rag_top_k: get(conn, KEY_RAG_TOP_K, &mut denied)
+                .parse()
+                .unwrap_or(DEFAULT_RAG_TOP_K),
         };
         cfg.presets = presets_from(get(conn, KEY_PRESETS, &mut denied), &cfg.lang);
         LoadOutcome { cfg, denied }
@@ -69,6 +93,7 @@ impl Config {
     /// 写回宿主存储。失败只记 stderr，不影响后续使用（内存里的值仍然生效）。
     pub fn save<R: BufRead, W: Write>(&self, conn: &mut Conn<R, W>) {
         let presets_json = serde_json::to_string(&self.presets).unwrap_or_else(|_| "[]".to_owned());
+        let rag_top_k = self.rag_top_k.max(1).to_string();
         for (key, value) in [
             (KEY_BASE_URL, &self.base_url),
             (KEY_API_KEY, &self.api_key),
@@ -76,6 +101,10 @@ impl Config {
             (KEY_SYSTEM, &self.system),
             (KEY_LANG, &self.lang),
             (KEY_PRESETS, &presets_json),
+            (KEY_RAG_URL, &self.rag_url),
+            (KEY_RAG_USER, &self.rag_user),
+            (KEY_RAG_PASS, &self.rag_pass),
+            (KEY_RAG_TOP_K, &rag_top_k),
         ] {
             if let Err(err) = conn.call("store.set", json!({ "key": key, "value": value })) {
                 eprintln!("[game-buddy] store.set {key} 失败: {err}");
@@ -100,12 +129,23 @@ impl Config {
             return true;
         }
 
+        if field == KEY_RAG_TOP_K {
+            if let Ok(n) = value.trim().parse::<usize>() {
+                self.rag_top_k = n.clamp(1, 20);
+                return true;
+            }
+            return false;
+        }
+
         let slot = match field {
             KEY_BASE_URL => &mut self.base_url,
             KEY_API_KEY => &mut self.api_key,
             KEY_MODEL => &mut self.model,
             KEY_SYSTEM => &mut self.system,
             KEY_LANG => &mut self.lang,
+            KEY_RAG_URL => &mut self.rag_url,
+            KEY_RAG_USER => &mut self.rag_user,
+            KEY_RAG_PASS => &mut self.rag_pass,
             _ => return false,
         };
         *slot = value.to_owned();

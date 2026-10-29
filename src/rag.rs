@@ -74,11 +74,63 @@ fn system_prompt(cfg: &Config) -> String {
     }
 }
 
+/// 知识库检索回来的一条片段。
+#[derive(Debug, Clone)]
+pub struct Source {
+    pub title: String,
+    pub section: String,
+    pub site: String,
+    pub url: String,
+    pub text: String,
+}
+
+impl Source {
+    /// 界面与提示词里用的短标签。
+    pub fn label(&self) -> String {
+        match (self.title.trim().is_empty(), self.section.trim().is_empty()) {
+            (true, true) => self.site.clone(),
+            (false, true) => self.title.clone(),
+            (true, false) => self.section.clone(),
+            (false, false) => format!("{} · {}", self.title, self.section),
+        }
+    }
+}
+
+/// 拼进系统提示词的资料块上限（字符）。
+const CONTEXT_MAX_CHARS: usize = 6000;
+
+/// 把检索片段拼成提示词里的「参考资料」段。
+pub fn context_block(sources: &[Source]) -> String {
+    let mut out = String::from("\n\n【知识库资料】\n");
+    let mut used = 0usize;
+    for (i, src) in sources.iter().enumerate() {
+        let text = src.text.trim();
+        let cost = text.chars().count();
+        if used + cost > CONTEXT_MAX_CHARS {
+            break;
+        }
+        used += cost;
+        out.push_str(&format!("[{}] {}\n{}\n\n", i + 1, src.label(), text));
+    }
+    out.push_str("回答时优先依据以上资料；资料不足就直说，不要编造。");
+    out
+}
+
 /// 组装发往端点的 `messages`：system + 有预算上限的历史 + 当前问题。
 ///
 /// 历史从**最新**往回取，超预算就停——宁可少带上下文，也不让请求体撞上宿主的 64 KiB 硬上限。
-pub fn build_messages(cfg: &Config, turns: &[Message], question: &str) -> Vec<Value> {
-    let mut messages = vec![json!({ "role": "system", "content": system_prompt(cfg) })];
+pub fn build_messages(
+    cfg: &Config,
+    turns: &[Message],
+    question: &str,
+    sources: &[Source],
+) -> Vec<Value> {
+    let system = if sources.is_empty() {
+        system_prompt(cfg)
+    } else {
+        format!("{}{}", system_prompt(cfg), context_block(sources))
+    };
+    let mut messages = vec![json!({ "role": "system", "content": system })];
 
     let mut budget = CONTEXT_BUDGET_BYTES;
     let mut picked: Vec<Value> = Vec::new();
@@ -103,6 +155,7 @@ pub fn ask<R: BufRead, W: Write>(
     cfg: &Config,
     turns: &[Message],
     question: &str,
+    sources: &[Source],
 ) -> Result<String, RagError> {
     if !cfg.is_ready() {
         return Err(RagError::NotReady);
@@ -111,7 +164,7 @@ pub fn ask<R: BufRead, W: Write>(
     let body = json!({
         "model": cfg.model,
         "stream": false,
-        "messages": build_messages(cfg, turns, question)
+        "messages": build_messages(cfg, turns, question, sources)
     });
     let body_text = body.to_string();
     if body_text.len() > 60 * 1024 {
@@ -147,7 +200,7 @@ pub fn test_connection<R: BufRead, W: Write>(
     conn: &mut Conn<R, W>,
     cfg: &Config,
 ) -> Result<(), RagError> {
-    ask(conn, cfg, &[], "ping").map(|_| ())
+    ask(conn, cfg, &[], "ping", &[]).map(|_| ())
 }
 
 /// 从 OpenAI 兼容响应里取 `choices[0].message.content`（纯函数，便于单测）。
@@ -165,12 +218,12 @@ pub fn extract_answer(body: &str) -> Result<String, RagError> {
 }
 
 /// 宿主 `error` 帧里的错误码（缺省 0）。
-fn rpc_code(err: &Value) -> i64 {
+pub(crate) fn rpc_code(err: &Value) -> i64 {
     err.get("code").and_then(Value::as_i64).unwrap_or(0)
 }
 
 /// 宿主 `error` 帧里的原始消息（文案由 `RagError::describe` 按码决定）。
-fn rpc_message(err: &Value) -> String {
+pub(crate) fn rpc_message(err: &Value) -> String {
     err.get("message")
         .and_then(Value::as_str)
         .unwrap_or("宿主拒绝")
@@ -202,7 +255,7 @@ mod tests {
     fn 历史按时间顺序拼在问题之前() {
         let cfg = Config::default();
         let turns = vec![turn(Role::User, "第一问"), turn(Role::Assistant, "第一答")];
-        let msgs = build_messages(&cfg, &turns, "第二问");
+        let msgs = build_messages(&cfg, &turns, "第二问", &[]);
         assert_eq!(msgs.len(), 4);
         assert_eq!(msgs[0]["role"], "system");
         assert_eq!(msgs[1]["content"], "第一问");
@@ -219,7 +272,7 @@ mod tests {
             turn(Role::Assistant, &big),
             turn(Role::User, &big),
         ];
-        let msgs = build_messages(&cfg, &turns, "问题");
+        let msgs = build_messages(&cfg, &turns, "问题", &[]);
         // 预算 48 KiB：只能容下一整条 30 KiB 的历史，其余被丢弃
         assert_eq!(msgs.len(), 3, "system + 1 条历史 + 当前问题");
         assert_eq!(msgs[2]["content"], "问题");
@@ -233,6 +286,45 @@ mod tests {
         assert!(host(2005).describe(s).contains("2 MiB"));
         assert!(host(2002).describe(s).contains("授权"), "未授权要指向授权窗");
         assert_eq!(host(9999).describe(s), "原始消息", "未知码保留原始消息");
+    }
+
+
+    #[test]
+    fn 资料块拼进系统提示词() {
+        let cfg = Config::default();
+        let sources = vec![Source {
+            title: "地下城".into(),
+            section: "血槌熔炉".into(),
+            site: "wx-wow".into(),
+            url: "https://x/1".into(),
+            text: "首领掉落：护腕。".into(),
+        }];
+        let msgs = build_messages(&cfg, &[], "怎么打", &sources);
+        let system = msgs[0]["content"].as_str().unwrap();
+        assert!(system.contains("知识库资料"));
+        assert!(system.contains("地下城 · 血槌熔炉"), "{system}");
+        assert!(system.contains("首领掉落"));
+        assert_eq!(msgs.len(), 2, "system + 当前问题");
+    }
+
+    #[test]
+    fn 没有资料时系统提示词不带资料块() {
+        let cfg = Config::default();
+        let msgs = build_messages(&cfg, &[], "怎么打", &[]);
+        let system = msgs[0]["content"].as_str().unwrap();
+        assert!(!system.contains("知识库资料"));
+    }
+
+    #[test]
+    fn 资料超出预算时截断() {
+        let cfg = Config::default();
+        let big = "资".repeat(CONTEXT_MAX_CHARS);
+        let sources = vec![
+            Source { title: "甲".into(), section: String::new(), site: "s".into(), url: String::new(), text: big },
+            Source { title: "乙".into(), section: String::new(), site: "s".into(), url: String::new(), text: "第二条不该出现".into() },
+        ];
+        let block = context_block(&sources);
+        assert!(!block.contains("第二条不该出现"), "超预算后应停止追加");
     }
 
     #[test]

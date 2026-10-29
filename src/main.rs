@@ -5,8 +5,12 @@
 //!
 //! 纪律：**stdout 只写帧**，所有诊断走 stderr（宿主只保留 stderr 末尾若干行）。
 
+// json! 展开的键变多后默认递归上限不够
+#![recursion_limit = "512"]
+
 mod config;
 mod i18n;
+mod kb;
 mod protocol;
 mod rag;
 mod ui;
@@ -15,6 +19,7 @@ use config::{Config, LoadOutcome};
 use protocol::{Conn, Incoming, MODULE_ID, PROTOCOL_VERSION};
 use serde_json::{json, Value};
 use std::io::{self, BufRead, BufWriter, Write};
+use rag::Source;
 use ui::{Message, Role, View};
 
 /// 进程内的全部可变状态。
@@ -27,6 +32,8 @@ struct App {
     status: String,
     /// 完整对话（含助手回答），既用于展示历史也用于多轮上下文。
     turns: Vec<Message>,
+    /// 本次回答引用的知识库片段。
+    sources: Vec<Source>,
     draft: String,
 }
 
@@ -43,6 +50,7 @@ impl App {
             answer: String::new(),
             status: status.to_owned(),
             turns: Vec::new(),
+            sources: Vec::new(),
             draft: String::new(),
         }
     }
@@ -62,7 +70,14 @@ impl App {
             conn.notify("ui.declare", json!({ "json": ui::declaration(self.view).to_string() }))?;
             self.declared = Some(self.view);
         }
-        let payload = ui::state(self.strings(), &self.cfg, &self.answer, &self.status, &self.turns);
+        let payload = ui::state(
+            self.strings(),
+            &self.cfg,
+            &self.answer,
+            &self.status,
+            &self.turns,
+            &self.sources,
+        );
         conn.notify("event", json!({ "topic": "state", "payload": payload }))
     }
 }
@@ -184,6 +199,7 @@ fn handle_action<R: BufRead, W: Write>(
         }
         "clear" => {
             app.turns.clear();
+            app.sources.clear();
             app.answer.clear();
             app.draft.clear();
             app.status = app.strings().cleared.to_owned();
@@ -221,9 +237,25 @@ fn run_ask<R: BufRead, W: Write>(
     }
 
     app.status = app.strings().busy.to_owned();
+    app.sources.clear();
     app.publish(conn, false)?;
 
-    match rag::ask(conn, &app.cfg, &app.turns, &question) {
+    // 先检索：配了知识库就取片段；取不到就明说，不静默降级成「无资料作答」
+    let sources = match kb::retrieve(conn, &app.cfg, &question) {
+        Ok(found) => found,
+        Err(err) => {
+            eprintln!("[game-buddy] 检索失败：{err:?}");
+            app.status = format!(
+                "{}：{}",
+                app.strings().retrieval_failed,
+                err.describe(app.strings())
+            );
+            return app.publish(conn, false);
+        }
+    };
+    app.sources = sources.clone();
+
+    match rag::ask(conn, &app.cfg, &app.turns, &question, &sources) {
         Ok(answer) => {
             app.turns.push(Message { role: Role::User, text: question });
             app.answer = answer.clone();

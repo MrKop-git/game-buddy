@@ -8,6 +8,7 @@
 
 use crate::config::Config;
 use crate::i18n::Strings;
+use crate::rag::Source;
 use serde_json::{json, Value};
 
 /// 当前显示的界面。
@@ -55,6 +56,17 @@ fn ask_declaration() -> Value {
                 { "type": "Text",
                   "props": { "text": "{status}", "size": "small", "color": "text.muted", "wrap": true } },
                 { "type": "Markdown", "props": { "text": "{answer}" } },
+                { "type": "Collapsible", "if": "{has_sources}",
+                  "props": { "label": "{t_sources}", "open": false },
+                  "children": [
+                      { "type": "Repeat",
+                        "repeat": { "source": "sources", "as": "s" },
+                        "props": { "spacing": 2 },
+                        "children": [
+                            { "type": "Text",
+                              "props": { "text": "{s.label}", "size": "small", "color": "text.muted", "trim": true } }
+                        ] }
+                  ] },
                 { "type": "Repeat",
                   "repeat": { "source": "history", "as": "m" },
                   "props": { "spacing": 2 },
@@ -138,6 +150,20 @@ fn settings_declaration() -> Value {
                   "props": { "text": "{preset2}", "size": "small" },
                   "events": { "input": "settings.preset2" } },
 
+                { "type": "Text", "props": { "text": "{t_field_rag}", "size": "small", "color": "text.muted" } },
+                { "type": "TextBox",
+                  "props": { "text": "{ragUrl}", "placeholder": "{t_hint_rag}", "size": "small" },
+                  "events": { "input": "settings.ragUrl" } },
+                { "type": "TextBox",
+                  "props": { "text": "{ragUser}", "placeholder": "{t_hint_rag_user}", "size": "small" },
+                  "events": { "input": "settings.ragUser" } },
+                { "type": "TextBox",
+                  "props": { "text": "{ragPass}", "placeholder": "{t_hint_rag_pass}", "size": "small" },
+                  "events": { "input": "settings.ragPass" } },
+                { "type": "TextBox",
+                  "props": { "text": "{ragTopK}", "placeholder": "{t_hint_rag_topk}", "size": "small" },
+                  "events": { "input": "settings.ragTopK" } },
+
                 { "type": "Text", "props": { "text": "{status}", "size": "small", "color": "text.muted", "wrap": true } },
 
                 { "type": "Stack",
@@ -182,7 +208,14 @@ pub fn state(
     answer: &str,
     status: &str,
     turns: &[Message],
+    sources: &[Source],
 ) -> Value {
+    let source_items: Vec<Value> = sources
+        .iter()
+        .filter(|s| !s.text.trim().is_empty())
+        .map(|s| json!({ "label": s.label(), "url": s.url }))
+        .collect();
+    let has_sources = if source_items.is_empty() { "false" } else { "true" };
     let history: Vec<Value> = turns
         .iter()
         .filter(|m| m.role == Role::User)
@@ -203,6 +236,12 @@ pub fn state(
         "t_field_model": strings.field_model,
         "t_field_system": strings.field_system,
         "t_field_preset": strings.field_preset,
+        "t_field_rag": strings.field_rag,
+        "t_hint_rag": strings.hint_rag,
+        "t_hint_rag_user": strings.hint_rag_user,
+        "t_hint_rag_pass": strings.hint_rag_pass,
+        "t_hint_rag_topk": strings.hint_rag_topk,
+        "t_sources": strings.sources,
         "t_field_lang": strings.field_lang,
         "t_hint_base": strings.hint_base,
         "t_hint_key": strings.hint_key,
@@ -214,6 +253,8 @@ pub fn state(
         "status": status,
         "busy": "false",
         "history": history,
+        "sources": source_items,
+        "has_sources": has_sources,
 
         // 快捷提问：pN_on 决定按钮显示与否（空串隐藏），pN_label 是按钮文案
         "p0_on": on_off(cfg.preset(0)),
@@ -230,6 +271,10 @@ pub fn state(
         "preset0": cfg.preset(0),
         "preset1": cfg.preset(1),
         "preset2": cfg.preset(2),
+        "ragUrl": cfg.rag_url,
+        "ragUser": cfg.rag_user,
+        "ragPass": cfg.rag_pass,
+        "ragTopK": cfg.rag_top_k.to_string(),
     })
 }
 
@@ -259,7 +304,7 @@ mod tests {
     fn 状态键扁平且文案齐全() {
         let s = crate::i18n::strings("zh");
         let cfg = Config::default();
-        let v = state(s, &cfg, "", s.idle, &[]);
+        let v = state(s, &cfg, "", s.idle, &[], &[]);
         assert_eq!(v["t_title"], "游戏助手");
         assert_eq!(v["busy"], "false");
         assert_eq!(v["status"], "就绪");
@@ -275,7 +320,7 @@ mod tests {
             presets: vec!["问一".into(), String::new(), "问三".into()],
             ..Default::default()
         };
-        let v = state(s, &cfg, "", s.idle, &[]);
+        let v = state(s, &cfg, "", s.idle, &[], &[]);
         assert_eq!(v["p0_on"], "true");
         assert_eq!(v["p0_label"], "问一");
         assert_eq!(v["p1_on"], "false", "空槽要隐藏按钮");
@@ -290,7 +335,7 @@ mod tests {
             Message { role: Role::User, text: "问一".into() },
             Message { role: Role::Assistant, text: "答一".into() },
         ];
-        let v = state(s, &Config::default(), "答一", s.idle, &turns);
+        let v = state(s, &Config::default(), "答一", s.idle, &turns, &[]);
         let history = v["history"].as_array().unwrap();
         assert_eq!(history.len(), 1, "助手回答不该重复出现在历史里");
         assert_eq!(history[0]["text"], "问一");
