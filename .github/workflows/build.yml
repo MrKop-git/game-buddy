@@ -1,0 +1,72 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+jobs:
+  test:
+    name: 单测与协议驱动
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: 单测
+        run: cargo test
+      - name: 编译并跑协议驱动
+        run: |
+          cargo build
+          python3 tests/fake-host.py target/debug/game-buddy
+
+  package:
+    name: 交叉编译与打包
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-gnu
+      - name: 装 mingw 与 zip
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends mingw-w64 zip
+      - name: 交叉编译
+        run: cargo build --release --target x86_64-pc-windows-gnu
+      - name: 打包
+        run: bash tools/pack.sh
+      - name: 校验 zip 根目录形状
+        run: |
+          set -eu
+          zip_file="$(ls dist/*.zip | head -1)"
+          listing="$(unzip -l "$zip_file" | awk '{print $4}' | grep -v '^$' || true)"
+          echo "$listing"
+          echo "$listing" | grep -qx "module.json" || { echo "zip 根缺少 module.json" >&2; exit 1; }
+          echo "$listing" | grep -qx "game-buddy.exe" || { echo "zip 根缺少 game-buddy.exe" >&2; exit 1; }
+      - name: 校验两个清单版本一致
+        run: |
+          set -eu
+          cargo_version="$(sed -n 's/^version *= *"\(.*\)"/\1/p' Cargo.toml | head -1)"
+          module_version="$(grep -o '"version"[[:space:]]*:[[:space:]]*"[^"]*"' module.json | head -1 | sed 's/.*"\([^"]*\)"$/\1/')"
+          echo "Cargo=$cargo_version module.json=$module_version"
+          [ "$cargo_version" = "$module_version" ] || { echo "版本号不一致" >&2; exit 1; }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: game-buddy-module
+          path: dist/*.zip
+          retention-days: 7
+
+  release:
+    name: 发布
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [test, package]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: game-buddy-module
+          path: dist
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.zip

@@ -1,0 +1,21 @@
+[package]
+name = "game-buddy"
+version = "0.1.0"
+edition = "2021"
+description = "SideDesk 悬浮式在线 RAG 游戏助手（sidecar 模块）"
+license = "MIT"
+
+[[bin]]
+name = "game-buddy"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

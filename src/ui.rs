@@ -1,0 +1,197 @@
+//! `sideui/v1` 声明与 `state` 载荷。
+//!
+//! 两条硬规矩（宿主 ADR-0017 §3）：
+//! - 文本槽只接受 `@key`（宿主词典）或 `{path}`（数据绑定），**裸字面量一律被拒**；
+//! - 所以本模块的每一句自有文案都经 `state` 的扁平顶层键送达，声明里只写占位符。
+//!
+//! 视觉值一律写语义 token（`accent` / `text.muted` / `small` …），不写 `#RRGGBB` 或字号数字。
+
+use crate::config::Config;
+use crate::i18n::Strings;
+use serde_json::{json, Value};
+
+/// 当前显示的界面。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum View {
+    Ask,
+    Settings,
+}
+
+/// 一条对话记录（`Repeat` 的集合源，每项必须是对象）。
+#[derive(Debug, Clone)]
+pub struct Message {
+    pub text: String,
+}
+
+/// 问答视图的声明。
+fn ask_declaration() -> Value {
+    json!({
+        "schema": "sideui/v1",
+        "id": "game-buddy",
+        "title": "{t_title}",
+        "category": "interactive",
+        "body": {
+            "type": "Stack",
+            "props": { "spacing": 8, "margin": 8 },
+            "children": [
+                { "type": "Text",
+                  "props": { "text": "{status}", "size": "small", "color": "text.muted", "wrap": true } },
+                { "type": "Markdown", "props": { "text": "{answer}" } },
+                { "type": "Repeat",
+                  "repeat": { "source": "history", "as": "m" },
+                  "props": { "spacing": 2 },
+                  "children": [
+                      { "type": "Text",
+                        "props": { "text": "{m.text}", "size": "small", "color": "text.secondary", "trim": true } }
+                  ] },
+                { "type": "TextBox",
+                  "props": { "placeholder": "{t_ask_placeholder}", "size": "body" },
+                  "events": { "input": "draft", "submit": "ask" } },
+                { "type": "Stack",
+                  "props": { "orientation": "horizontal", "spacing": 6 },
+                  "children": [
+                      { "type": "Button",
+                        "props": { "label": "{t_send}", "color": "accent" },
+                        "events": { "click": "ask" } },
+                      { "type": "Button",
+                        "props": { "label": "{t_settings}" },
+                        "events": { "click": "settings.open" } }
+                  ] }
+            ]
+        }
+    })
+}
+
+/// 设置视图的声明。
+fn settings_declaration() -> Value {
+    json!({
+        "schema": "sideui/v1",
+        "id": "game-buddy",
+        "title": "{t_settings}",
+        "category": "interactive",
+        "body": {
+            "type": "Stack",
+            "props": { "spacing": 6, "margin": 8 },
+            "children": [
+                { "type": "Text", "props": { "text": "{t_field_base}", "size": "small", "color": "text.muted" } },
+                { "type": "TextBox",
+                  "props": { "text": "{baseUrl}", "placeholder": "{t_hint_base}", "size": "small" },
+                  "events": { "input": "settings.baseUrl" } },
+
+                { "type": "Text", "props": { "text": "{t_field_key}", "size": "small", "color": "text.muted" } },
+                { "type": "TextBox",
+                  "props": { "text": "{apiKey}", "placeholder": "{t_hint_key}", "size": "small" },
+                  "events": { "input": "settings.apiKey" } },
+
+                { "type": "Text", "props": { "text": "{t_field_model}", "size": "small", "color": "text.muted" } },
+                { "type": "TextBox",
+                  "props": { "text": "{model}", "placeholder": "{t_hint_model}", "size": "small" },
+                  "events": { "input": "settings.model" } },
+
+                { "type": "Text", "props": { "text": "{t_field_system}", "size": "small", "color": "text.muted" } },
+                { "type": "TextBox",
+                  "props": { "text": "{system}", "placeholder": "{t_hint_system}", "size": "small" },
+                  "events": { "input": "settings.system" } },
+
+                { "type": "Text", "props": { "text": "{status}", "size": "small", "color": "text.muted", "wrap": true } },
+
+                { "type": "Stack",
+                  "props": { "orientation": "horizontal", "spacing": 6 },
+                  "children": [
+                      { "type": "Button",
+                        "props": { "label": "{t_save}", "color": "accent" },
+                        "events": { "click": "settings.save" } },
+                      { "type": "Button",
+                        "props": { "label": "{t_test}" },
+                        "events": { "click": "settings.test" } },
+                      { "type": "Button",
+                        "props": { "label": "{t_lang_switch}" },
+                        "events": { "click": "settings.lang" } },
+                      { "type": "Button",
+                        "props": { "label": "{t_back}" },
+                        "events": { "click": "settings.back" } }
+                  ] }
+            ]
+        }
+    })
+}
+
+/// 按视图取声明（整集替换，宿主收到即重绘）。
+pub fn declaration(view: View) -> Value {
+    match view {
+        View::Ask => ask_declaration(),
+        View::Settings => settings_declaration(),
+    }
+}
+
+/// 组装 `state` 载荷。
+///
+/// 顶层键就是 `{path}` 能取的**全部**词表：宿主不按点嵌套解析，所以文案键一律扁平。
+/// 布尔必须是字符串 `"true"`/`"false"`——JSON 布尔经宿主序列化会变成 `"True"`，与它按
+/// Ordinal 比较的判据对不上。
+pub fn state(
+    strings: &Strings,
+    cfg: &Config,
+    answer: &str,
+    status: &str,
+    history: &[Message],
+) -> Value {
+    let history_json: Vec<Value> = history.iter().map(|m| json!({ "text": m.text })).collect();
+    json!({
+        "t_title": strings.title,
+        "t_ask_placeholder": strings.ask_placeholder,
+        "t_send": strings.send,
+        "t_settings": strings.settings,
+        "t_back": strings.back,
+        "t_save": strings.save,
+        "t_test": strings.test,
+        "t_field_base": strings.field_base,
+        "t_field_key": strings.field_key,
+        "t_field_model": strings.field_model,
+        "t_field_system": strings.field_system,
+        "t_field_lang": strings.field_lang,
+        "t_hint_base": strings.hint_base,
+        "t_hint_key": strings.hint_key,
+        "t_hint_model": strings.hint_model,
+        "t_hint_system": strings.hint_system,
+        "t_lang_switch": strings.lang_switch,
+
+        "answer": answer,
+        "status": status,
+        "busy": "false",
+        "history": history_json,
+
+        "baseUrl": cfg.base_url,
+        "apiKey": cfg.api_key,
+        "model": cfg.model,
+        "system": cfg.system,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn 声明不含裸字面量文本槽() {
+        // 每个 Text/TextBox/Markdown 的文本槽都必须是 {path}——这里抽查关键节点。
+        let decl = declaration(View::Ask);
+        let text = decl["body"]["children"].to_string();
+        assert!(text.contains("{status}"));
+        assert!(text.contains("{t_ask_placeholder}"));
+        assert!(!text.contains("\"text\":\"就绪\""));
+    }
+
+    #[test]
+    fn 状态键扁平且文案齐全() {
+        let s = crate::i18n::strings("zh");
+        let cfg = Config::default();
+        let v = state(s, &cfg, "", s.idle, &[]);
+        assert_eq!(v["t_title"], "游戏助手");
+        assert_eq!(v["busy"], "false");
+        assert_eq!(v["status"], "就绪");
+        assert!(v["history"].is_array());
+        // 嵌套对象会被宿主按对象摊平、取不到字段——这里确保没有嵌套文案对象
+        assert!(v["t_send"].is_string());
+    }
+}
