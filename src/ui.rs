@@ -62,6 +62,19 @@ fn ask_declaration() -> Value {
                       { "type": "Text",
                         "props": { "text": "{m.text}", "size": "small", "color": "text.secondary", "trim": true } }
                   ] },
+                { "type": "Stack",
+                  "props": { "orientation": "horizontal", "spacing": 6 },
+                  "children": [
+                      { "type": "Button", "if": "{p0_on}",
+                        "props": { "label": "{p0_label}", "size": "small" },
+                        "events": { "click": "preset.0" } },
+                      { "type": "Button", "if": "{p1_on}",
+                        "props": { "label": "{p1_label}", "size": "small" },
+                        "events": { "click": "preset.1" } },
+                      { "type": "Button", "if": "{p2_on}",
+                        "props": { "label": "{p2_label}", "size": "small" },
+                        "events": { "click": "preset.2" } }
+                  ] },
                 { "type": "TextBox",
                   "props": { "placeholder": "{t_ask_placeholder}", "size": "body" },
                   "events": { "input": "draft", "submit": "ask" } },
@@ -113,6 +126,17 @@ fn settings_declaration() -> Value {
                 { "type": "TextBox",
                   "props": { "text": "{system}", "placeholder": "{t_hint_system}", "size": "small" },
                   "events": { "input": "settings.system" } },
+
+                { "type": "Text", "props": { "text": "{t_field_preset}", "size": "small", "color": "text.muted" } },
+                { "type": "TextBox",
+                  "props": { "text": "{preset0}", "size": "small" },
+                  "events": { "input": "settings.preset0" } },
+                { "type": "TextBox",
+                  "props": { "text": "{preset1}", "size": "small" },
+                  "events": { "input": "settings.preset1" } },
+                { "type": "TextBox",
+                  "props": { "text": "{preset2}", "size": "small" },
+                  "events": { "input": "settings.preset2" } },
 
                 { "type": "Text", "props": { "text": "{status}", "size": "small", "color": "text.muted", "wrap": true } },
 
@@ -178,6 +202,7 @@ pub fn state(
         "t_field_key": strings.field_key,
         "t_field_model": strings.field_model,
         "t_field_system": strings.field_system,
+        "t_field_preset": strings.field_preset,
         "t_field_lang": strings.field_lang,
         "t_hint_base": strings.hint_base,
         "t_hint_key": strings.hint_key,
@@ -190,11 +215,31 @@ pub fn state(
         "busy": "false",
         "history": history,
 
+        // 快捷提问：pN_on 决定按钮显示与否（空串隐藏），pN_label 是按钮文案
+        "p0_on": on_off(cfg.preset(0)),
+        "p0_label": cfg.preset(0),
+        "p1_on": on_off(cfg.preset(1)),
+        "p1_label": cfg.preset(1),
+        "p2_on": on_off(cfg.preset(2)),
+        "p2_label": cfg.preset(2),
+
         "baseUrl": cfg.base_url,
         "apiKey": cfg.api_key,
         "model": cfg.model,
         "system": cfg.system,
+        "preset0": cfg.preset(0),
+        "preset1": cfg.preset(1),
+        "preset2": cfg.preset(2),
     })
+}
+
+/// 布尔槽必须是字符串：宿主按 Ordinal 比 `"true"`，JSON 布尔会序列化成 `"True"`。
+fn on_off(value: &str) -> &'static str {
+    if value.trim().is_empty() {
+        "false"
+    } else {
+        "true"
+    }
 }
 
 #[cfg(test)]
@@ -221,6 +266,21 @@ mod tests {
         assert!(v["history"].is_array());
         assert!(v["t_send"].is_string());
         assert!(v["t_clear"].is_string());
+    }
+
+    #[test]
+    fn 快捷提问空槽隐藏按钮() {
+        let s = crate::i18n::strings("zh");
+        let cfg = Config {
+            presets: vec!["问一".into(), String::new(), "问三".into()],
+            ..Default::default()
+        };
+        let v = state(s, &cfg, "", s.idle, &[]);
+        assert_eq!(v["p0_on"], "true");
+        assert_eq!(v["p0_label"], "问一");
+        assert_eq!(v["p1_on"], "false", "空槽要隐藏按钮");
+        assert_eq!(v["p2_on"], "true");
+        assert_eq!(v["preset2"], "问三", "设置页绑定的是同一份值");
     }
 
     #[test]

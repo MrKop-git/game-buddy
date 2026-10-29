@@ -10,6 +10,10 @@ const KEY_API_KEY: &str = "apiKey";
 const KEY_MODEL: &str = "model";
 const KEY_SYSTEM: &str = "system";
 const KEY_LANG: &str = "lang";
+const KEY_PRESETS: &str = "presets";
+
+/// 快捷提问槽位数量（界面是静态声明，槽位固定，每个槽一个动作名）。
+pub const PRESET_SLOTS: usize = 3;
 
 /// 模块配置。空 `base_url` / `api_key` / `model` 视为未配置。
 #[derive(Debug, Clone, Default)]
@@ -20,6 +24,8 @@ pub struct Config {
     pub system: String,
     /// `"zh"` 或 `"en"`，空 = 跟随默认（中文）。
     pub lang: String,
+    /// 快捷提问文案，长度恒为 [`PRESET_SLOTS`]（空串 = 该槽不显示按钮）。
+    pub presets: Vec<String>,
 }
 
 /// 加载结果：配置本体 + 是否因为**缺少能力授权**而读不到。
@@ -46,24 +52,30 @@ impl Config {
     /// 从宿主存储读取；缺失的键保持默认值，授权缺失单独标记。
     pub fn load<R: BufRead, W: Write>(conn: &mut Conn<R, W>) -> LoadOutcome {
         let mut denied = false;
-        let cfg = Self {
+        // 语言先读：快捷提问的默认文案按语言取
+        let lang = get(conn, KEY_LANG, &mut denied);
+        let mut cfg = Self {
             base_url: get(conn, KEY_BASE_URL, &mut denied),
             api_key: get(conn, KEY_API_KEY, &mut denied),
             model: get(conn, KEY_MODEL, &mut denied),
             system: get(conn, KEY_SYSTEM, &mut denied),
-            lang: get(conn, KEY_LANG, &mut denied),
+            lang,
+            presets: Vec::new(),
         };
+        cfg.presets = presets_from(get(conn, KEY_PRESETS, &mut denied), &cfg.lang);
         LoadOutcome { cfg, denied }
     }
 
     /// 写回宿主存储。失败只记 stderr，不影响后续使用（内存里的值仍然生效）。
     pub fn save<R: BufRead, W: Write>(&self, conn: &mut Conn<R, W>) {
+        let presets_json = serde_json::to_string(&self.presets).unwrap_or_else(|_| "[]".to_owned());
         for (key, value) in [
             (KEY_BASE_URL, &self.base_url),
             (KEY_API_KEY, &self.api_key),
             (KEY_MODEL, &self.model),
             (KEY_SYSTEM, &self.system),
             (KEY_LANG, &self.lang),
+            (KEY_PRESETS, &presets_json),
         ] {
             if let Err(err) = conn.call("store.set", json!({ "key": key, "value": value })) {
                 eprintln!("[game-buddy] store.set {key} 失败: {err}");
@@ -71,8 +83,23 @@ impl Config {
         }
     }
 
+    /// 第 `i` 个快捷提问（越界或空串返回空）。
+    pub fn preset(&self, i: usize) -> &str {
+        self.presets.get(i).map(String::as_str).unwrap_or_default()
+    }
+
     /// 按动作名写入单个字段（设置页的 `input` 事件用）。未知字段返回 false。
     pub fn set_field(&mut self, field: &str, value: &str) -> bool {
+        if let Some(rest) = field.strip_prefix("preset") {
+            let Ok(idx) = rest.parse::<usize>() else { return false };
+            if idx >= PRESET_SLOTS {
+                return false;
+            }
+            self.presets.resize(PRESET_SLOTS, String::new());
+            self.presets[idx] = value.to_owned();
+            return true;
+        }
+
         let slot = match field {
             KEY_BASE_URL => &mut self.base_url,
             KEY_API_KEY => &mut self.api_key,
@@ -84,6 +111,32 @@ impl Config {
         *slot = value.to_owned();
         true
     }
+}
+
+/// 把存储里的 JSON 数组规整成固定槽位：缺的补空串、多的截断、解析失败回落默认值。
+fn presets_from(raw: String, lang: &str) -> Vec<String> {
+    let defaults = || -> Vec<String> {
+        crate::i18n::strings(lang)
+            .default_presets
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect()
+    };
+
+    let mut slots = if raw.trim().is_empty() {
+        defaults()
+    } else {
+        match serde_json::from_str::<Vec<String>>(&raw) {
+            Ok(v) => v,
+            Err(err) => {
+                eprintln!("[game-buddy] presets 不是合法的字符串数组（{err}），回落默认值");
+                defaults()
+            }
+        }
+    };
+    slots.resize(PRESET_SLOTS, String::new());
+    slots.truncate(PRESET_SLOTS);
+    slots
 }
 
 /// 读一个键；失败与缺失都回落空串（模块不该因为存储不可用就起不来）。
@@ -142,5 +195,30 @@ mod tests {
             ..Default::default()
         };
         assert!(!cfg.is_ready(), "缺 model 时不该就绪");
+    }
+
+    #[test]
+    fn 快捷提问槽位规整成固定数量() {
+        let fresh = presets_from(String::new(), "zh");
+        assert_eq!(fresh.len(), PRESET_SLOTS);
+        assert_eq!(fresh[0], "这个 BOSS 怎么打？", "未配置时用内置默认");
+
+        let short = presets_from(r#"["a"]"#.to_owned(), "zh");
+        assert_eq!(short, vec!["a", "", ""], "缺的槽补空串");
+
+        let long = presets_from(r#"["a","b","c","d"]"#.to_owned(), "zh");
+        assert_eq!(long.len(), PRESET_SLOTS, "多的截断");
+
+        let broken = presets_from("not json".to_owned(), "zh");
+        assert_eq!(broken.len(), PRESET_SLOTS, "坏数据回落默认而不是清空");
+    }
+
+    #[test]
+    fn 按槽位写快捷提问() {
+        let mut cfg = Config::default();
+        assert!(cfg.set_field("preset1", "自定义问题"));
+        assert_eq!(cfg.preset(1), "自定义问题");
+        assert_eq!(cfg.preset(0), "", "没写的槽是空的（界面据此隐藏按钮）");
+        assert!(!cfg.set_field("preset9", "x"), "越界槽位要拒绝");
     }
 }

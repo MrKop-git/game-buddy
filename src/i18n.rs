@@ -17,6 +17,7 @@ pub struct Strings {
     pub field_key: &'static str,
     pub field_model: &'static str,
     pub field_system: &'static str,
+    pub field_preset: &'static str,
     pub field_lang: &'static str,
     pub hint_base: &'static str,
     pub hint_key: &'static str,
@@ -38,6 +39,8 @@ pub struct Strings {
     pub err_server: &'static str,
     pub err_timeout: &'static str,
     pub err_too_large: &'static str,
+    /// 未配置时使用的三个快捷提问默认值。
+    pub default_presets: [&'static str; 3],
 }
 
 const ZH: Strings = Strings {
@@ -53,6 +56,7 @@ const ZH: Strings = Strings {
     field_key: "API Key",
     field_model: "模型",
     field_system: "系统提示词",
+    field_preset: "快捷提问（留空则该按钮隐藏）",
     field_lang: "界面语言",
     hint_base: "如 https://api.example.com/v1",
     hint_key: "sk-...",
@@ -74,6 +78,7 @@ const ZH: Strings = Strings {
     err_server: "服务端错误，稍后再试",
     err_timeout: "请求超时（宿主上限 10 秒）：换更快的模型，或把问题拆小",
     err_too_large: "响应超过宿主 2 MiB 上限",
+    default_presets: ["这个 BOSS 怎么打？", "这个道具/机制有什么用？", "接下来该做什么？"],
 };
 
 const EN: Strings = Strings {
@@ -89,6 +94,7 @@ const EN: Strings = Strings {
     field_key: "API key",
     field_model: "Model",
     field_system: "System prompt",
+    field_preset: "Quick questions (empty hides the button)",
     field_lang: "Language",
     hint_base: "e.g. https://api.example.com/v1",
     hint_key: "sk-...",
@@ -110,6 +116,7 @@ const EN: Strings = Strings {
     err_server: "Server error; try again later",
     err_timeout: "Request timed out (host cap is 10s): use a faster model or split the question",
     err_too_large: "Response exceeds the host's 2 MiB cap",
+    default_presets: ["How do I beat this boss?", "What does this item do?", "What should I do next?"],
 };
 
 /// 按语言取文案；非 `en` 一律中文。

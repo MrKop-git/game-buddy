@@ -190,6 +190,13 @@ fn handle_action<R: BufRead, W: Write>(
             conn.respond_ok(id, json!({}))?;
             app.publish(conn, false)?;
         }
+        // 快捷提问：点一下直接把该槽的文案发出去，不用打字
+        "preset.0" | "preset.1" | "preset.2" => {
+            let idx = method.trim_start_matches("preset.").parse::<usize>().unwrap_or(0);
+            let question = app.cfg.preset(idx).to_owned();
+            conn.respond_ok(id, json!({}))?;
+            run_ask(app, conn, question)?;
+        }
         _ => return Ok(false),
     }
     Ok(true)

@@ -25,6 +25,8 @@ FAKE_CONFIG = {
     "baseUrl": "https://api.example.com/v1",
     "apiKey": "sk-test",
     "model": "test-model",
+    # 值本身是 JSON 字符串；中间那个空槽用来验证「空槽隐藏按钮」
+    "presets": json.dumps(["这个 BOSS 怎么打？", "", "下一步去哪？"], ensure_ascii=False),
 }
 
 
@@ -215,6 +217,25 @@ def main() -> int:
         cleared = state_payload(d.serve_until(is_state))
         assert cleared["history"] == [], cleared["history"]
         assert cleared["answer"] == "", cleared["answer"]
+
+        # 7.7) 快捷提问：点一下直接发问；空槽不该出按钮
+        assert cleared["p0_on"] == "true", cleared["p0_on"]
+        assert cleared["p1_on"] == "false", "空槽必须隐藏按钮"
+        assert cleared["p0_label"] == "这个 BOSS 怎么打？", cleared["p0_label"]
+
+        d.send({"jsonrpc": "2.0", "id": "r4", "method": "preset.0", "params": None})
+        d.serve_until(is_response_to("r4"))
+        d.serve_until(is_state)  # 忙状态
+        req3 = d.serve_until(is_http)
+        sent3 = json.loads(req3["params"]["body"])
+        assert sent3["messages"][-1]["content"] == "这个 BOSS 怎么打？", sent3["messages"][-1]
+        assert len(sent3["messages"]) == 2, "清空后不该再带上旧上下文"
+        d.reply_ok(
+            req3,
+            {"status": 200, "contentType": "application/json",
+             "body": json.dumps({"choices": [{"message": {"content": "先拉扯再爆发。"}}]}, ensure_ascii=False)},
+        )
+        d.serve_until(is_state)
 
         # 8) 关窗 → 进程退出
         d.send({"jsonrpc": "2.0", "method": "ui.lifecycle", "params": {"surface": "overlay", "event": "closed"}})
