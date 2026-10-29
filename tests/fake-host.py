@@ -68,6 +68,8 @@ class Driver:
             self.declares.append(json.loads(frame["params"]["json"]))
         elif frame.get("method") == "event" and frame.get("params", {}).get("topic") == "state":
             self.states.append(frame["params"]["payload"])
+        elif frame.get("method") == "http.fetch":
+            self.http_requests.append(frame.get("params") or {})
         return frame
 
     def reply_ok(self, frame: dict, result: dict) -> None:
@@ -178,7 +180,6 @@ def main() -> int:
         assert hp["headers"]["Authorization"].startswith("Bearer "), "必须带 Authorization 头"
         assert hp["headers"]["Content-Type"] == "application/json", hp["headers"]
         assert hp["url"].endswith("/chat/completions"), hp["url"]
-        d.http_requests.append(hp)
 
         # 6) 回一份 OpenAI 兼容响应
         canned = {
@@ -189,6 +190,31 @@ def main() -> int:
         # 7) 最终状态里应出现回答
         final = state_payload(d.serve_until(is_state))
         assert CANNED_ANSWER in final["answer"], f"回答未出现在状态里：{final['answer']!r}"
+
+        # 7.5) 第二轮：上一轮的问答应作为上下文带进请求
+        d.send({"jsonrpc": "2.0", "id": "r2", "method": "ask", "params": {"value": "那第二阶段呢？"}})
+        d.serve_until(is_response_to("r2"))
+        d.serve_until(is_state)  # 忙状态
+        req2 = d.serve_until(is_http)
+        sent = json.loads(req2["params"]["body"])
+        roles = [m["role"] for m in sent["messages"]]
+        assert roles == ["system", "user", "assistant", "user"], f"上下文顺序不对：{roles}"
+        assert sent["messages"][1]["content"] == "这个 Boss 怎么打？", sent["messages"][1]
+        assert sent["messages"][2]["content"] == CANNED_ANSWER, sent["messages"][2]
+        assert sent["messages"][3]["content"] == "那第二阶段呢？", sent["messages"][3]
+        d.reply_ok(
+            req2,
+            {"status": 200, "contentType": "application/json",
+             "body": json.dumps({"choices": [{"message": {"content": "第二阶段先躲范围技。"}}]}, ensure_ascii=False)},
+        )
+        d.serve_until(is_state)
+
+        # 7.6) 清空对话：历史与回答都归零
+        d.send({"jsonrpc": "2.0", "id": "r3", "method": "clear", "params": None})
+        d.serve_until(is_response_to("r3"))
+        cleared = state_payload(d.serve_until(is_state))
+        assert cleared["history"] == [], cleared["history"]
+        assert cleared["answer"] == "", cleared["answer"]
 
         # 8) 关窗 → 进程退出
         d.send({"jsonrpc": "2.0", "method": "ui.lifecycle", "params": {"surface": "overlay", "event": "closed"}})

@@ -17,9 +17,27 @@ pub enum View {
     Settings,
 }
 
-/// 一条对话记录（`Repeat` 的集合源，每项必须是对象）。
+/// 对话里一条消息的角色。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Role {
+    User,
+    Assistant,
+}
+
+impl Role {
+    /// OpenAI 兼容接口用的角色名。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Assistant => "assistant",
+        }
+    }
+}
+
+/// 一条对话记录。
 #[derive(Debug, Clone)]
 pub struct Message {
+    pub role: Role,
     pub text: String,
 }
 
@@ -53,6 +71,9 @@ fn ask_declaration() -> Value {
                       { "type": "Button",
                         "props": { "label": "{t_send}", "color": "accent" },
                         "events": { "click": "ask" } },
+                      { "type": "Button",
+                        "props": { "label": "{t_clear}" },
+                        "events": { "click": "clear" } },
                       { "type": "Button",
                         "props": { "label": "{t_settings}" },
                         "events": { "click": "settings.open" } }
@@ -129,18 +150,26 @@ pub fn declaration(view: View) -> Value {
 /// 顶层键就是 `{path}` 能取的**全部**词表：宿主不按点嵌套解析，所以文案键一律扁平。
 /// 布尔必须是字符串 `"true"`/`"false"`——JSON 布尔经宿主序列化会变成 `"True"`，与它按
 /// Ordinal 比较的判据对不上。
+///
+/// `history` 只摊**用户提问**（助手回答已经由 `answer` 单条展示，不重复列）。
 pub fn state(
     strings: &Strings,
     cfg: &Config,
     answer: &str,
     status: &str,
-    history: &[Message],
+    turns: &[Message],
 ) -> Value {
-    let history_json: Vec<Value> = history.iter().map(|m| json!({ "text": m.text })).collect();
+    let history: Vec<Value> = turns
+        .iter()
+        .filter(|m| m.role == Role::User)
+        .map(|m| json!({ "text": m.text }))
+        .collect();
+
     json!({
         "t_title": strings.title,
         "t_ask_placeholder": strings.ask_placeholder,
         "t_send": strings.send,
+        "t_clear": strings.clear,
         "t_settings": strings.settings,
         "t_back": strings.back,
         "t_save": strings.save,
@@ -159,7 +188,7 @@ pub fn state(
         "answer": answer,
         "status": status,
         "busy": "false",
-        "history": history_json,
+        "history": history,
 
         "baseUrl": cfg.base_url,
         "apiKey": cfg.api_key,
@@ -174,7 +203,6 @@ mod tests {
 
     #[test]
     fn 声明不含裸字面量文本槽() {
-        // 每个 Text/TextBox/Markdown 的文本槽都必须是 {path}——这里抽查关键节点。
         let decl = declaration(View::Ask);
         let text = decl["body"]["children"].to_string();
         assert!(text.contains("{status}"));
@@ -191,7 +219,20 @@ mod tests {
         assert_eq!(v["busy"], "false");
         assert_eq!(v["status"], "就绪");
         assert!(v["history"].is_array());
-        // 嵌套对象会被宿主按对象摊平、取不到字段——这里确保没有嵌套文案对象
         assert!(v["t_send"].is_string());
+        assert!(v["t_clear"].is_string());
+    }
+
+    #[test]
+    fn 历史只列用户提问() {
+        let s = crate::i18n::strings("zh");
+        let turns = vec![
+            Message { role: Role::User, text: "问一".into() },
+            Message { role: Role::Assistant, text: "答一".into() },
+        ];
+        let v = state(s, &Config::default(), "答一", s.idle, &turns);
+        let history = v["history"].as_array().unwrap();
+        assert_eq!(history.len(), 1, "助手回答不该重复出现在历史里");
+        assert_eq!(history[0]["text"], "问一");
     }
 }

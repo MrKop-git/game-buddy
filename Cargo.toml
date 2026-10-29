@@ -1,6 +1,6 @@
 [package]
 name = "game-buddy"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "SideDesk 悬浮式在线 RAG 游戏助手（sidecar 模块）"
 license = "MIT"

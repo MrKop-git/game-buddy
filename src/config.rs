@@ -11,7 +11,7 @@ const KEY_MODEL: &str = "model";
 const KEY_SYSTEM: &str = "system";
 const KEY_LANG: &str = "lang";
 
-/// 模块配置。空 `base_url` / `api_key` 视为未配置。
+/// 模块配置。空 `base_url` / `api_key` / `model` 视为未配置。
 #[derive(Debug, Clone, Default)]
 pub struct Config {
     pub base_url: String,
@@ -20,6 +20,16 @@ pub struct Config {
     pub system: String,
     /// `"zh"` 或 `"en"`，空 = 跟随默认（中文）。
     pub lang: String,
+}
+
+/// 加载结果：配置本体 + 是否因为**缺少能力授权**而读不到。
+///
+/// 区分这两种情形很重要——读不到配置时用户看到的是空表单，若不点明「去授权」，
+/// 会被误当成「模块坏了」。
+#[derive(Debug, Clone, Default)]
+pub struct LoadOutcome {
+    pub cfg: Config,
+    pub denied: bool,
 }
 
 impl Config {
@@ -33,15 +43,17 @@ impl Config {
         format!("{}/chat/completions", self.base_url.trim().trim_end_matches('/'))
     }
 
-    /// 从宿主存储读取；缺失的键保持默认值。
-    pub fn load<R: BufRead, W: Write>(conn: &mut Conn<R, W>) -> Self {
-        let mut cfg = Self::default();
-        cfg.base_url = get(conn, KEY_BASE_URL);
-        cfg.api_key = get(conn, KEY_API_KEY);
-        cfg.model = get(conn, KEY_MODEL);
-        cfg.system = get(conn, KEY_SYSTEM);
-        cfg.lang = get(conn, KEY_LANG);
-        cfg
+    /// 从宿主存储读取；缺失的键保持默认值，授权缺失单独标记。
+    pub fn load<R: BufRead, W: Write>(conn: &mut Conn<R, W>) -> LoadOutcome {
+        let mut denied = false;
+        let cfg = Self {
+            base_url: get(conn, KEY_BASE_URL, &mut denied),
+            api_key: get(conn, KEY_API_KEY, &mut denied),
+            model: get(conn, KEY_MODEL, &mut denied),
+            system: get(conn, KEY_SYSTEM, &mut denied),
+            lang: get(conn, KEY_LANG, &mut denied),
+        };
+        LoadOutcome { cfg, denied }
     }
 
     /// 写回宿主存储。失败只记 stderr，不影响后续使用（内存里的值仍然生效）。
@@ -75,7 +87,7 @@ impl Config {
 }
 
 /// 读一个键；失败与缺失都回落空串（模块不该因为存储不可用就起不来）。
-fn get<R: BufRead, W: Write>(conn: &mut Conn<R, W>, key: &str) -> String {
+fn get<R: BufRead, W: Write>(conn: &mut Conn<R, W>, key: &str, denied: &mut bool) -> String {
     match conn.call("store.get", json!({ "key": key })) {
         Ok(result) => result
             .get("value")
@@ -83,8 +95,14 @@ fn get<R: BufRead, W: Write>(conn: &mut Conn<R, W>, key: &str) -> String {
             .unwrap_or_default()
             .to_owned(),
         Err(CallError::Closed) => String::new(),
-        Err(err) => {
-            eprintln!("[game-buddy] store.get {key} 失败: {err}");
+        Err(CallError::Rpc(err)) => {
+            // 2001 未声明 / 2002 未授权 —— 都指向「去授权窗」
+            let code = err.get("code").and_then(Value::as_i64).unwrap_or(0);
+            if code == 2001 || code == 2002 {
+                *denied = true;
+            } else {
+                eprintln!("[game-buddy] store.get {key} 失败: {err}");
+            }
             String::new()
         }
     }
@@ -114,5 +132,15 @@ mod tests {
         assert_eq!(cfg.base_url, "u");
         assert_eq!(cfg.lang, "en");
         assert!(!cfg.set_field("nope", "x"));
+    }
+
+    #[test]
+    fn 缺字段就不算就绪() {
+        let cfg = Config {
+            base_url: "https://x/v1".into(),
+            api_key: "k".into(),
+            ..Default::default()
+        };
+        assert!(!cfg.is_ready(), "缺 model 时不该就绪");
     }
 }

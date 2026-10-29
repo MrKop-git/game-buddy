@@ -11,11 +11,11 @@ mod protocol;
 mod rag;
 mod ui;
 
-use config::Config;
+use config::{Config, LoadOutcome};
 use protocol::{Conn, Incoming, MODULE_ID, PROTOCOL_VERSION};
 use serde_json::{json, Value};
 use std::io::{self, BufRead, BufWriter, Write};
-use ui::{Message, View};
+use ui::{Message, Role, View};
 
 /// 进程内的全部可变状态。
 struct App {
@@ -25,20 +25,24 @@ struct App {
     cfg: Config,
     answer: String,
     status: String,
-    history: Vec<Message>,
+    /// 完整对话（含助手回答），既用于展示历史也用于多轮上下文。
+    turns: Vec<Message>,
     draft: String,
 }
 
 impl App {
-    fn new(cfg: Config) -> Self {
-        let status = i18n::strings(&cfg.lang).idle.to_owned();
+    fn new(outcome: LoadOutcome) -> Self {
+        let strings = i18n::strings(&outcome.cfg.lang);
+        // 读不到配置且原因是缺授权时，直接把「去授权」写在状态行上——
+        // 否则用户看到的是空表单，会误以为模块坏了。
+        let status = if outcome.denied { strings.need_grant } else { strings.idle };
         Self {
             view: View::Ask,
             declared: None,
-            cfg,
+            cfg: outcome.cfg,
             answer: String::new(),
-            status,
-            history: Vec::new(),
+            status: status.to_owned(),
+            turns: Vec::new(),
             draft: String::new(),
         }
     }
@@ -58,7 +62,7 @@ impl App {
             conn.notify("ui.declare", json!({ "json": ui::declaration(self.view).to_string() }))?;
             self.declared = Some(self.view);
         }
-        let payload = ui::state(self.strings(), &self.cfg, &self.answer, &self.status, &self.history);
+        let payload = ui::state(self.strings(), &self.cfg, &self.answer, &self.status, &self.turns);
         conn.notify("event", json!({ "topic": "state", "payload": payload }))
     }
 }
@@ -82,8 +86,7 @@ fn main() -> io::Result<()> {
     }
 
     // 握手通过后才允许调能力：此时才读配置。
-    let cfg = Config::load(&mut conn);
-    let mut app = App::new(cfg);
+    let mut app = App::new(Config::load(&mut conn));
 
     // 先把界面与状态发出去：窗口尚未打开时宿主会存着，打开即渲染。
     app.publish(&mut conn, true)?;
@@ -94,7 +97,6 @@ fn main() -> io::Result<()> {
             Incoming::Notification { method, params } if method == "ui.lifecycle" => {
                 let event = params.get("event").and_then(Value::as_str).unwrap_or_default();
                 match event {
-                    // 窗口首次打开或被重新聚焦：补发声明并刷新数据
                     "opened" | "focused" => app.publish(&mut conn, event == "opened")?,
                     // 关窗即结束：宿主随后回收本进程
                     "closed" => break,
@@ -123,7 +125,7 @@ fn handle_action<R: BufRead, W: Write>(
     method: &str,
     params: &Value,
 ) -> io::Result<bool> {
-    // 设置页的字段输入：动作名即字段名，只更新内存不回推状态（回推会把输入框光标顶掉）
+    // 设置页的动作都带 `settings.` 前缀，字段名即动作名后缀
     if let Some(field) = method.strip_prefix("settings.") {
         match field {
             "open" => {
@@ -180,6 +182,14 @@ fn handle_action<R: BufRead, W: Write>(
             conn.respond_ok(id, json!({}))?;
             run_ask(app, conn, value_of(params))?;
         }
+        "clear" => {
+            app.turns.clear();
+            app.answer.clear();
+            app.draft.clear();
+            app.status = app.strings().cleared.to_owned();
+            conn.respond_ok(id, json!({}))?;
+            app.publish(conn, false)?;
+        }
         _ => return Ok(false),
     }
     Ok(true)
@@ -206,16 +216,17 @@ fn run_ask<R: BufRead, W: Write>(
     app.status = app.strings().busy.to_owned();
     app.publish(conn, false)?;
 
-    match rag::ask(conn, &app.cfg, &question) {
+    match rag::ask(conn, &app.cfg, &app.turns, &question) {
         Ok(answer) => {
-            app.answer = answer;
-            app.history.push(Message { text: question });
+            app.turns.push(Message { role: Role::User, text: question });
+            app.answer = answer.clone();
+            app.turns.push(Message { role: Role::Assistant, text: answer });
             app.draft.clear();
             app.status = app.strings().idle.to_owned();
         }
         Err(err) => {
-            eprintln!("[game-buddy] 提问失败：{err}");
-            app.status = err.to_string();
+            eprintln!("[game-buddy] 提问失败：{err:?}");
+            app.status = err.describe(app.strings());
         }
     }
     app.publish(conn, false)
@@ -237,8 +248,8 @@ fn run_connection_test<R: BufRead, W: Write>(
     app.status = match rag::test_connection(conn, &app.cfg) {
         Ok(()) => app.strings().test_ok.to_owned(),
         Err(err) => {
-            eprintln!("[game-buddy] 连接测试失败：{err}");
-            err.to_string()
+            eprintln!("[game-buddy] 连接测试失败：{err:?}");
+            err.describe(app.strings())
         }
     };
     app.publish(conn, false)
